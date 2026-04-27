@@ -830,5 +830,33 @@ class UsersTable:
                 return user.last_active_at >= three_minutes_ago
             return False
 
+    async def reset_user_cost(self, user_id: str, db: Optional[AsyncSession] = None) -> bool:
+        """Reset user's cost tracking by setting cost_reset_at timestamp in info field."""
+        try:
+            async with get_async_db_context(db) as db:
+                result = await db.execute(select(User).filter_by(id=user_id))
+                user = result.scalars().first()
+                if not user:
+                    return False
+
+                user_info = user.info or {}
+                user_info['cost_reset_at'] = int(time.time())
+
+                await db.execute(update(User).filter_by(id=user_id).values(info=user_info))
+                await db.commit()
+                return True
+        except Exception as e:
+            print(f"Error resetting user cost: {e}")
+            return False
+
+    async def get_user_cost_reset_at(self, user_id: str, db: Optional[AsyncSession] = None) -> Optional[int]:
+        """Get the timestamp when user's cost was last reset."""
+        async with get_async_db_context(db) as db:
+            result = await db.execute(select(User).filter_by(id=user_id))
+            user = result.scalars().first()
+            if user and user.info:
+                return user.info.get('cost_reset_at')
+            return None
+
 
 Users = UsersTable()

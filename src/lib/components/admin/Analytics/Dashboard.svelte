@@ -6,8 +6,13 @@
 		getModelAnalytics,
 		getUserAnalytics,
 		getDailyStats,
-		getTokenUsage
+		getTokenUsage,
+		getCostByModel,
+		getCostByUser,
+		exportCostAnalytics
 	} from '$lib/apis/analytics';
+	import fileSaver from 'file-saver';
+	const { saveAs } = fileSaver;
 	import { getGroups } from '$lib/apis/groups';
 	import Spinner from '$lib/components/common/Spinner.svelte';
 	import ChevronUp from '$lib/components/icons/ChevronUp.svelte';
@@ -64,6 +69,12 @@
 	> = {};
 	let totalTokens = { input: 0, output: 0, total: 0 };
 
+	// Cost data
+	let costByModel: Record<string, { input_cost: number; output_cost: number; total_cost: number }> = {};
+	let costByUser: Record<string, { input_cost: number; output_cost: number; total_cost: number }> = {};
+	let totalCost = { input: 0, output: 0, total: 0 };
+	let exporting = false;
+
 	let loading = true;
 
 	// Selected model for drill-down
@@ -99,12 +110,14 @@
 		try {
 			const { start, end } = getDateRange(selectedPeriod);
 			const granularity = selectedPeriod === '24h' ? 'hourly' : 'daily';
-			const [summaryRes, modelsRes, usersRes, dailyRes, tokensRes] = await Promise.all([
+			const [summaryRes, modelsRes, usersRes, dailyRes, tokensRes, costModelRes, costUserRes] = await Promise.all([
 				getSummary(localStorage.token, start, end, selectedGroupId),
 				getModelAnalytics(localStorage.token, start, end, selectedGroupId),
 				getUserAnalytics(localStorage.token, start, end, 50, selectedGroupId),
 				getDailyStats(localStorage.token, start, end, granularity, selectedGroupId),
-				getTokenUsage(localStorage.token, start, end, selectedGroupId)
+				getTokenUsage(localStorage.token, start, end, selectedGroupId),
+				getCostByModel(localStorage.token, start, end, selectedGroupId),
+				getCostByUser(localStorage.token, start, end, 50, selectedGroupId)
 			]);
 
 			summary = summaryRes ?? summary;
@@ -134,10 +147,56 @@
 					total: tokensRes.total_tokens
 				};
 			}
+
+			// Process cost data
+			if (costModelRes) {
+				costByModel = {};
+				for (const m of costModelRes.models) {
+					costByModel[m.model_id] = {
+						input_cost: m.input_cost,
+						output_cost: m.output_cost,
+						total_cost: m.total_cost
+					};
+				}
+				totalCost = {
+					input: costModelRes.total_input_cost,
+					output: costModelRes.total_output_cost,
+					total: costModelRes.total_cost
+				};
+			}
+
+			if (costUserRes) {
+				costByUser = {};
+				for (const u of costUserRes.users) {
+					costByUser[u.user_id] = {
+						input_cost: u.input_cost,
+						output_cost: u.output_cost,
+						total_cost: u.total_cost
+					};
+				}
+			}
 		} catch (err) {
 			console.error('Dashboard load failed:', err);
 		}
 		loading = false;
+	};
+
+	const formatCurrency = (amount: number): string => {
+		if (amount === 0) return '$0.00';
+		if (amount < 0.01) return `$${amount.toFixed(4)}`;
+		return `$${amount.toFixed(2)}`;
+	};
+
+	const handleExport = async (format: 'csv' | 'json') => {
+		exporting = true;
+		try {
+			const { start, end } = getDateRange(selectedPeriod);
+			const blob = await exportCostAnalytics(localStorage.token, format, start, end, selectedGroupId);
+			saveAs(blob, `cost-analytics-${Date.now()}.${format}`);
+		} catch (err) {
+			console.error('Export failed:', err);
+		}
+		exporting = false;
 	};
 
 	$: if (selectedPeriod || selectedGroupId !== undefined) {
@@ -163,6 +222,11 @@
 			const bTokens = tokenStats[b.model_id]?.total_tokens ?? 0;
 			return modelDirection === 'asc' ? aTokens - bTokens : bTokens - aTokens;
 		}
+		if (modelOrderBy === 'cost') {
+			const aCost = costByModel[a.model_id]?.total_cost ?? 0;
+			const bCost = costByModel[b.model_id]?.total_cost ?? 0;
+			return modelDirection === 'asc' ? aCost - bCost : bCost - aCost;
+		}
 		return modelDirection === 'asc' ? a.count - b.count : b.count - a.count;
 	});
 
@@ -176,6 +240,11 @@
 			const aTokens = a.total_tokens ?? 0;
 			const bTokens = b.total_tokens ?? 0;
 			return userDirection === 'asc' ? aTokens - bTokens : bTokens - aTokens;
+		}
+		if (userOrderBy === 'cost') {
+			const aCost = costByUser[a.user_id]?.total_cost ?? 0;
+			const bCost = costByUser[b.user_id]?.total_cost ?? 0;
+			return userDirection === 'asc' ? aCost - bCost : bCost - aCost;
 		}
 		return userDirection === 'asc' ? a.count - b.count : b.count - a.count;
 	});
@@ -230,31 +299,57 @@
 
 <!-- Summary stats -->
 {#if !loading}
-	<div class="flex gap-3 text-xs text-gray-500 dark:text-gray-400 px-0.5 pb-2">
-		<span
-			><span class="font-medium text-gray-900 dark:text-gray-300"
-				>{summary.total_messages.toLocaleString()}</span
-			>
-			{$i18n.t('messages')}</span
-		>
-		<Tooltip content={$i18n.t('Token counts are estimates and may not reflect actual API usage')}>
-			<span class="cursor-help"
+	<div class="flex flex-wrap gap-3 text-xs text-gray-500 dark:text-gray-400 px-0.5 pb-2 items-center justify-between">
+		<div class="flex flex-wrap gap-3">
+			<span
 				><span class="font-medium text-gray-900 dark:text-gray-300"
-					>{formatNumber(totalTokens.total)}</span
+					>{summary.total_messages.toLocaleString()}</span
 				>
-				{$i18n.t('tokens')}</span
+				{$i18n.t('messages')}</span
 			>
-		</Tooltip>
-		<span
-			><span class="font-medium text-gray-900 dark:text-gray-300"
-				>{summary.total_chats.toLocaleString()}</span
+			<Tooltip content={$i18n.t('Token counts are estimates and may not reflect actual API usage')}>
+				<span class="cursor-help"
+					><span class="font-medium text-gray-900 dark:text-gray-300"
+						>{formatNumber(totalTokens.total)}</span
+					>
+					{$i18n.t('tokens')}</span
+				>
+			</Tooltip>
+			<Tooltip content={$i18n.t('Cost estimates based on LiteLLM pricing data')}>
+				<span class="cursor-help"
+					><span class="font-medium text-gray-900 dark:text-gray-300"
+						>{formatCurrency(totalCost.total)}</span
+					>
+					{$i18n.t('cost')}</span
+				>
+			</Tooltip>
+			<span
+				><span class="font-medium text-gray-900 dark:text-gray-300"
+					>{summary.total_chats.toLocaleString()}</span
+				>
+				{$i18n.t('chats')}</span
 			>
-			{$i18n.t('chats')}</span
-		>
-		<span
-			><span class="font-medium text-gray-900 dark:text-gray-300">{summary.total_users}</span>
-			{$i18n.t('users')}</span
-		>
+			<span
+				><span class="font-medium text-gray-900 dark:text-gray-300">{summary.total_users}</span>
+				{$i18n.t('users')}</span
+			>
+		</div>
+		<div class="flex gap-1">
+			<button
+				class="px-2 py-1 text-xs bg-gray-100 dark:bg-gray-800 rounded hover:bg-gray-200 dark:hover:bg-gray-700 transition disabled:opacity-50"
+				disabled={exporting}
+				on:click={() => handleExport('csv')}
+			>
+				{exporting ? $i18n.t('Exporting...') : $i18n.t('Export CSV')}
+			</button>
+			<button
+				class="px-2 py-1 text-xs bg-gray-100 dark:bg-gray-800 rounded hover:bg-gray-200 dark:hover:bg-gray-700 transition disabled:opacity-50"
+				disabled={exporting}
+				on:click={() => handleExport('json')}
+			>
+				{$i18n.t('Export JSON')}
+			</button>
+		</div>
 	</div>
 
 	<!-- Daily usage chart -->
@@ -359,6 +454,24 @@
 							</th>
 							<th
 								scope="col"
+								class="px-2.5 py-2 cursor-pointer select-none text-right"
+								on:click={() => toggleModelSort('cost')}
+							>
+								<div class="flex gap-1.5 items-center justify-end">
+									{$i18n.t('Cost')}
+									{#if modelOrderBy === 'cost'}
+										<span class="font-normal">
+											{#if modelDirection === 'asc'}<ChevronUp
+													className="size-2"
+												/>{:else}<ChevronDown className="size-2" />{/if}
+										</span>
+									{:else}
+										<span class="invisible"><ChevronUp className="size-2" /></span>
+									{/if}
+								</div>
+							</th>
+							<th
+								scope="col"
 								class="px-2.5 py-2 cursor-pointer select-none text-right w-16"
 								on:click={() => toggleModelSort('percentage')}
 							>
@@ -404,6 +517,9 @@
 								<td class="px-3 py-1 text-right"
 									>{formatNumber(tokenStats[model.model_id]?.total_tokens ?? 0)}</td
 								>
+								<td class="px-3 py-1 text-right"
+									>{formatCurrency(costByModel[model.model_id]?.total_cost ?? 0)}</td
+								>
 								<td class="px-3 py-1 text-right text-gray-400">
 									{totalModelMessages > 0
 										? ((model.count / totalModelMessages) * 100).toFixed(1)
@@ -413,7 +529,7 @@
 						{/each}
 						{#if sortedModels.length === 0}
 							<tr
-								><td colspan="5" class="px-3 py-2 text-center text-gray-400"
+								><td colspan="6" class="px-3 py-2 text-center text-gray-400"
 									>{$i18n.t('No data')}</td
 								></tr
 							>
@@ -487,6 +603,24 @@
 									{/if}
 								</div>
 							</th>
+							<th
+								scope="col"
+								class="px-2.5 py-2 cursor-pointer select-none text-right"
+								on:click={() => toggleUserSort('cost')}
+							>
+								<div class="flex gap-1.5 items-center justify-end">
+									{$i18n.t('Cost')}
+									{#if userOrderBy === 'cost'}
+										<span class="font-normal">
+											{#if userDirection === 'asc'}<ChevronUp
+													className="size-2"
+												/>{:else}<ChevronDown className="size-2" />{/if}
+										</span>
+									{:else}
+										<span class="invisible"><ChevronUp className="size-2" /></span>
+									{/if}
+								</div>
+							</th>
 						</tr>
 					</thead>
 					<tbody>
@@ -510,11 +644,12 @@
 								</td>
 								<td class="px-3 py-1 text-right">{user.count.toLocaleString()}</td>
 								<td class="px-3 py-1 text-right">{formatNumber(user.total_tokens ?? 0)}</td>
+								<td class="px-3 py-1 text-right">{formatCurrency(costByUser[user.user_id]?.total_cost ?? 0)}</td>
 							</tr>
 						{/each}
 						{#if sortedUsers.length === 0}
 							<tr
-								><td colspan="4" class="px-3 py-2 text-center text-gray-400"
+								><td colspan="5" class="px-3 py-2 text-center text-gray-400"
 									>{$i18n.t('No data')}</td
 								></tr
 							>

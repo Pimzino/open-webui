@@ -114,6 +114,7 @@ from open_webui.utils.filter import (
 from open_webui.utils.code_interpreter import execute_code_jupyter
 from open_webui.utils.payload import apply_system_prompt_to_body
 from open_webui.utils.response import normalize_usage
+from open_webui.utils.pricing import calculate_cost, normalize_usage_with_cost
 from open_webui.utils.mcp.client import MCPClient
 
 
@@ -3434,6 +3435,18 @@ async def non_streaming_chat_response_handler(response, ctx):
                     # Save message in the database
                     usage = normalize_usage(response_data.get('usage', {}) or {})
 
+                    # Calculate cost if usage data is available
+                    if usage and usage.get('input_tokens') and usage.get('output_tokens'):
+                        model_id = metadata.get('model_id') or form_data.get('model', '')
+                        model_meta = (model.get('info', {}) or {}).get('meta') if isinstance(model, dict) else None
+                        cost = await calculate_cost(
+                            model_id,
+                            usage['input_tokens'],
+                            usage['output_tokens'],
+                            model_meta,
+                        )
+                        usage = normalize_usage_with_cost(usage, cost)
+
                     await Chats.upsert_message_to_chat_by_id_and_message_id(
                         metadata['chat_id'],
                         metadata['message_id'],
@@ -4959,6 +4972,18 @@ async def streaming_chat_response_handler(response, ctx):
                 for item in output:
                     if item.get('status') == 'in_progress':
                         item['status'] = 'completed'
+
+                # Calculate cost if usage data is available (streaming)
+                if usage and usage.get('input_tokens') and usage.get('output_tokens'):
+                    stream_model_id = metadata.get('model_id') or form_data.get('model', '')
+                    model_meta = (model.get('info', {}) or {}).get('meta') if isinstance(model, dict) else None
+                    cost = await calculate_cost(
+                        stream_model_id,
+                        usage['input_tokens'],
+                        usage['output_tokens'],
+                        model_meta,
+                    )
+                    usage = normalize_usage_with_cost(usage, cost)
 
                 title = await Chats.get_chat_title_by_id(metadata['chat_id'])
                 data = {

@@ -12,7 +12,7 @@
 
 	import { toast } from 'svelte-sonner';
 
-	import { updateUserRole, getUsers, deleteUserById } from '$lib/apis/users';
+	import { updateUserRole, getUsers, deleteUserById, resetUserCost } from '$lib/apis/users';
 
 	import Pagination from '$lib/components/common/Pagination.svelte';
 	import ChatBubbles from '$lib/components/icons/ChatBubbles.svelte';
@@ -50,10 +50,22 @@
 	let selectedUser = null;
 
 	let showDeleteConfirmDialog = false;
+	let showResetCostConfirmDialog = false;
 	let showAddUserModal = false;
 
 	let showUserChatsModal = false;
 	let showEditUserModal = false;
+
+	const resetUserCostHandler = async (id) => {
+		const res = await resetUserCost(localStorage.token, id).catch((error) => {
+			toast.error(`${error}`);
+			return null;
+		});
+
+		if (res) {
+			toast.success($i18n.t('User cost has been reset'));
+		}
+	};
 
 	const deleteUserHandler = async (id) => {
 		const res = await deleteUserById(localStorage.token, id).catch((error) => {
@@ -120,6 +132,15 @@
 	on:confirm={() => {
 		deleteUserHandler(selectedUser.id);
 	}}
+/>
+
+<ConfirmDialog
+	bind:show={showResetCostConfirmDialog}
+	on:confirm={() => {
+		resetUserCostHandler(selectedUser.id);
+	}}
+	title={$i18n.t('Reset User Cost')}
+	message={$i18n.t('Are you sure you want to reset this user\'s cost to $0? This action cannot be undone.')}
 />
 
 <AddUserModal
@@ -446,6 +467,32 @@
 												stroke-linecap="round"
 												stroke-linejoin="round"
 												d="m16.862 4.487 1.687-1.688a1.875 1.875 0 1 1 2.652 2.652L6.832 19.82a4.5 4.5 0 0 1-1.897 1.13l-2.685.8.8-2.685a4.5 4.5 0 0 1 1.13-1.897L16.863 4.487Zm0 0L19.5 7.125"
+											/>
+										</svg>
+									</button>
+								</Tooltip>
+
+								<Tooltip content={$i18n.t('Reset Cost')}>
+									<button
+										class="self-center w-fit text-sm px-2 py-2 hover:bg-black/5 dark:hover:bg-white/5 rounded-xl"
+										aria-label={$i18n.t('Reset Cost')}
+										on:click={async () => {
+											showResetCostConfirmDialog = true;
+											selectedUser = user;
+										}}
+									>
+										<svg
+											xmlns="http://www.w3.org/2000/svg"
+											fill="none"
+											viewBox="0 0 24 24"
+											stroke-width="1.5"
+											stroke="currentColor"
+											class="w-4 h-4"
+										>
+											<path
+												stroke-linecap="round"
+												stroke-linejoin="round"
+												d="M12 6v12m-3-2.818.879.659c1.171.879 3.07.879 4.242 0 1.172-.879 1.172-2.303 0-3.182C13.536 12.219 12.768 12 12 12c-.725 0-1.45-.22-2.003-.659-1.106-.879-1.106-2.303 0-3.182s2.9-.879 4.006 0l.415.33M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z"
 											/>
 										</svg>
 									</button>

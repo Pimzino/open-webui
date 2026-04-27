@@ -3,7 +3,7 @@ import time
 import uuid
 from typing import Any, Optional
 
-from sqlalchemy import select, delete, func, cast, Integer
+from sqlalchemy import select, delete, func, cast, Integer, Float
 from sqlalchemy.ext.asyncio import AsyncSession
 from open_webui.internal.db import Base, get_async_db_context
 from open_webui.utils.response import normalize_usage
@@ -595,6 +595,199 @@ class ChatMessageTable:
                     current += timedelta(hours=1)
 
             return hourly_counts
+
+    async def get_cost_by_model(
+        self,
+        start_date: Optional[int] = None,
+        end_date: Optional[int] = None,
+        group_id: Optional[str] = None,
+        db: Optional[AsyncSession] = None,
+    ) -> dict[str, dict]:
+        """Aggregate cost by model using database-level aggregation."""
+        async with get_async_db_context(db) as db:
+            from open_webui.models.groups import GroupMember
+
+            bind = await db.connection()
+            dialect = bind.dialect.name
+
+            if dialect == 'sqlite':
+                input_cost = cast(func.json_extract(ChatMessage.usage, '$.cost.input_cost'), Float)
+                output_cost = cast(func.json_extract(ChatMessage.usage, '$.cost.output_cost'), Float)
+                total_cost = cast(func.json_extract(ChatMessage.usage, '$.cost.total_cost'), Float)
+            elif dialect == 'postgresql':
+                input_cost = cast(
+                    func.json_extract_path_text(ChatMessage.usage, 'cost', 'input_cost'),
+                    Float,
+                )
+                output_cost = cast(
+                    func.json_extract_path_text(ChatMessage.usage, 'cost', 'output_cost'),
+                    Float,
+                )
+                total_cost = cast(
+                    func.json_extract_path_text(ChatMessage.usage, 'cost', 'total_cost'),
+                    Float,
+                )
+            else:
+                raise NotImplementedError(f'Unsupported dialect: {dialect}')
+
+            stmt = select(
+                ChatMessage.model_id,
+                func.coalesce(func.sum(input_cost), 0).label('input_cost'),
+                func.coalesce(func.sum(output_cost), 0).label('output_cost'),
+                func.coalesce(func.sum(total_cost), 0).label('total_cost'),
+                func.count(ChatMessage.id).label('message_count'),
+            ).filter(
+                ChatMessage.role == 'assistant',
+                ChatMessage.model_id.isnot(None),
+                ChatMessage.usage.isnot(None),
+            )
+
+            if start_date:
+                stmt = stmt.filter(ChatMessage.created_at >= start_date)
+            if end_date:
+                stmt = stmt.filter(ChatMessage.created_at <= end_date)
+            if group_id:
+                group_users = select(GroupMember.user_id).filter(GroupMember.group_id == group_id).scalar_subquery()
+                stmt = stmt.filter(ChatMessage.user_id.in_(group_users))
+
+            stmt = stmt.group_by(ChatMessage.model_id)
+            result = await db.execute(stmt)
+
+            return {
+                row.model_id: {
+                    'input_cost': float(row.input_cost or 0),
+                    'output_cost': float(row.output_cost or 0),
+                    'total_cost': float(row.total_cost or 0),
+                    'message_count': row.message_count,
+                }
+                for row in result.all()
+            }
+
+    async def get_cost_by_user(
+        self,
+        start_date: Optional[int] = None,
+        end_date: Optional[int] = None,
+        group_id: Optional[str] = None,
+        db: Optional[AsyncSession] = None,
+    ) -> dict[str, dict]:
+        """Aggregate cost by user using database-level aggregation."""
+        async with get_async_db_context(db) as db:
+            from open_webui.models.groups import GroupMember
+
+            bind = await db.connection()
+            dialect = bind.dialect.name
+
+            if dialect == 'sqlite':
+                input_cost = cast(func.json_extract(ChatMessage.usage, '$.cost.input_cost'), Float)
+                output_cost = cast(func.json_extract(ChatMessage.usage, '$.cost.output_cost'), Float)
+                total_cost = cast(func.json_extract(ChatMessage.usage, '$.cost.total_cost'), Float)
+            elif dialect == 'postgresql':
+                input_cost = cast(
+                    func.json_extract_path_text(ChatMessage.usage, 'cost', 'input_cost'),
+                    Float,
+                )
+                output_cost = cast(
+                    func.json_extract_path_text(ChatMessage.usage, 'cost', 'output_cost'),
+                    Float,
+                )
+                total_cost = cast(
+                    func.json_extract_path_text(ChatMessage.usage, 'cost', 'total_cost'),
+                    Float,
+                )
+            else:
+                raise NotImplementedError(f'Unsupported dialect: {dialect}')
+
+            stmt = select(
+                ChatMessage.user_id,
+                func.coalesce(func.sum(input_cost), 0).label('input_cost'),
+                func.coalesce(func.sum(output_cost), 0).label('output_cost'),
+                func.coalesce(func.sum(total_cost), 0).label('total_cost'),
+                func.count(ChatMessage.id).label('message_count'),
+            ).filter(
+                ChatMessage.role == 'assistant',
+                ChatMessage.user_id.isnot(None),
+                ChatMessage.usage.isnot(None),
+            )
+
+            if start_date:
+                stmt = stmt.filter(ChatMessage.created_at >= start_date)
+            if end_date:
+                stmt = stmt.filter(ChatMessage.created_at <= end_date)
+            if group_id:
+                group_users = select(GroupMember.user_id).filter(GroupMember.group_id == group_id).scalar_subquery()
+                stmt = stmt.filter(ChatMessage.user_id.in_(group_users))
+
+            stmt = stmt.group_by(ChatMessage.user_id)
+            result = await db.execute(stmt)
+
+            return {
+                row.user_id: {
+                    'input_cost': float(row.input_cost or 0),
+                    'output_cost': float(row.output_cost or 0),
+                    'total_cost': float(row.total_cost or 0),
+                    'message_count': row.message_count,
+                }
+                for row in result.all()
+            }
+
+    async def get_user_cost_summary(
+        self,
+        user_id: str,
+        start_date: Optional[int] = None,
+        end_date: Optional[int] = None,
+        db: Optional[AsyncSession] = None,
+    ) -> dict:
+        """Get cost summary for a specific user."""
+        async with get_async_db_context(db) as db:
+            bind = await db.connection()
+            dialect = bind.dialect.name
+
+            if dialect == 'sqlite':
+                input_cost = cast(func.json_extract(ChatMessage.usage, '$.cost.input_cost'), Float)
+                output_cost = cast(func.json_extract(ChatMessage.usage, '$.cost.output_cost'), Float)
+                total_cost = cast(func.json_extract(ChatMessage.usage, '$.cost.total_cost'), Float)
+            elif dialect == 'postgresql':
+                input_cost = cast(
+                    func.json_extract_path_text(ChatMessage.usage, 'cost', 'input_cost'),
+                    Float,
+                )
+                output_cost = cast(
+                    func.json_extract_path_text(ChatMessage.usage, 'cost', 'output_cost'),
+                    Float,
+                )
+                total_cost = cast(
+                    func.json_extract_path_text(ChatMessage.usage, 'cost', 'total_cost'),
+                    Float,
+                )
+            else:
+                raise NotImplementedError(f'Unsupported dialect: {dialect}')
+
+            stmt = select(
+                func.coalesce(func.sum(input_cost), 0).label('input_cost'),
+                func.coalesce(func.sum(output_cost), 0).label('output_cost'),
+                func.coalesce(func.sum(total_cost), 0).label('total_cost'),
+                func.count(ChatMessage.id).label('message_count'),
+            ).filter(
+                ChatMessage.role == 'assistant',
+                ChatMessage.user_id == user_id,
+                ChatMessage.usage.isnot(None),
+            )
+
+            if start_date:
+                stmt = stmt.filter(ChatMessage.created_at >= start_date)
+            if end_date:
+                stmt = stmt.filter(ChatMessage.created_at <= end_date)
+
+            result = await db.execute(stmt)
+            row = result.one()
+
+            return {
+                'input_cost': float(row.input_cost or 0),
+                'output_cost': float(row.output_cost or 0),
+                'total_cost': float(row.total_cost or 0),
+                'message_count': row.message_count,
+                'currency': 'USD',
+            }
 
 
 ChatMessages = ChatMessageTable()

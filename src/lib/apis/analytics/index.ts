@@ -317,3 +317,139 @@ export const getModelOverview = async (token: string = '', modelId: string, days
 
 	return res;
 };
+
+// Cost Analytics
+
+export const getUserCostSummary = async (token: string = '') => {
+	let error = null;
+
+	const res = await fetch(`${WEBUI_API_BASE_URL}/analytics/user/cost`, {
+		method: 'GET',
+		headers: {
+			Accept: 'application/json',
+			'Content-Type': 'application/json',
+			authorization: `Bearer ${token}`
+		}
+	})
+		.then(async (res) => {
+			if (!res.ok) throw await res.json();
+			return res.json();
+		})
+		.catch((err) => {
+			error = err.detail;
+			console.error(err);
+			return null;
+		});
+
+	if (error) {
+		throw error;
+	}
+
+	return res;
+};
+
+export const getCostByModel = async (
+	token: string = '',
+	startDate: number | null = null,
+	endDate: number | null = null,
+	groupId: string | null = null
+) => {
+	let error = null;
+
+	const searchParams = new URLSearchParams();
+	if (startDate) searchParams.append('start_date', startDate.toString());
+	if (endDate) searchParams.append('end_date', endDate.toString());
+	if (groupId) searchParams.append('group_id', groupId);
+
+	const res = await fetch(`${WEBUI_API_BASE_URL}/analytics/costs?${searchParams.toString()}`, {
+		method: 'GET',
+		headers: {
+			Accept: 'application/json',
+			'Content-Type': 'application/json',
+			authorization: `Bearer ${token}`
+		}
+	})
+		.then(async (res) => {
+			if (!res.ok) throw await res.json();
+			return res.json();
+		})
+		.catch((err) => {
+			error = err.detail;
+			console.error(err);
+			return null;
+		});
+
+	if (error) {
+		throw error;
+	}
+
+	return res;
+};
+
+export const getCostByUser = async (
+	token: string = '',
+	startDate: number | null = null,
+	endDate: number | null = null,
+	limit: number = 50,
+	groupId: string | null = null
+) => {
+	let error = null;
+
+	const searchParams = new URLSearchParams();
+	if (startDate) searchParams.append('start_date', startDate.toString());
+	if (endDate) searchParams.append('end_date', endDate.toString());
+	if (limit) searchParams.append('limit', limit.toString());
+	if (groupId) searchParams.append('group_id', groupId);
+
+	const res = await fetch(`${WEBUI_API_BASE_URL}/analytics/costs/users?${searchParams.toString()}`, {
+		method: 'GET',
+		headers: {
+			Accept: 'application/json',
+			'Content-Type': 'application/json',
+			authorization: `Bearer ${token}`
+		}
+	})
+		.then(async (res) => {
+			if (!res.ok) throw await res.json();
+			return res.json();
+		})
+		.catch((err) => {
+			error = err.detail;
+			console.error(err);
+			return null;
+		});
+
+	if (error) {
+		throw error;
+	}
+
+	return res;
+};
+
+export const exportCostAnalytics = async (
+	token: string = '',
+	format: 'csv' | 'json' = 'csv',
+	startDate: number | null = null,
+	endDate: number | null = null,
+	groupId: string | null = null
+): Promise<Blob> => {
+	const searchParams = new URLSearchParams();
+	searchParams.append('format', format);
+	if (startDate) searchParams.append('start_date', startDate.toString());
+	if (endDate) searchParams.append('end_date', endDate.toString());
+	if (groupId) searchParams.append('group_id', groupId);
+
+	const res = await fetch(`${WEBUI_API_BASE_URL}/analytics/costs/export?${searchParams.toString()}`, {
+		method: 'GET',
+		headers: {
+			authorization: `Bearer ${token}`
+		}
+	});
+
+	if (!res.ok) {
+		const error = await res.json();
+		throw error.detail || 'Export failed';
+	}
+
+	return res.blob();
+};

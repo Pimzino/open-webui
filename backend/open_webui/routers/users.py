@@ -662,6 +662,33 @@ async def delete_user_by_id(user_id: str, user=Depends(get_admin_user), db: Asyn
 
 
 ############################
+# ResetUserCost
+############################
+
+
+@router.post('/{user_id}/reset-cost', response_model=bool)
+async def reset_user_cost_by_id(
+    user_id: str, user=Depends(get_admin_user), db: AsyncSession = Depends(get_async_session)
+):
+    """Reset a user's cost tracking to $0 by setting a cost_reset_at timestamp."""
+    target_user = await Users.get_user_by_id(user_id, db=db)
+    if not target_user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=ERROR_MESSAGES.USER_NOT_FOUND,
+        )
+
+    result = await Users.reset_user_cost(user_id, db=db)
+    if result:
+        return True
+
+    raise HTTPException(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        detail='Failed to reset user cost',
+    )
+
+
+############################
 # GetUserGroupsById
 ############################
 

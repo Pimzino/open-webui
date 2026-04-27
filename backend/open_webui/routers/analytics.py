@@ -2,7 +2,12 @@ from typing import Optional
 from datetime import datetime, timedelta
 from collections import defaultdict
 import logging
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Response
+from fastapi.responses import StreamingResponse
+import csv
+import io
+import json as json_lib
+import time
 from pydantic import BaseModel
 
 from open_webui.models.chat_messages import ChatMessages, ChatMessageModel
@@ -10,7 +15,7 @@ from open_webui.models.chats import Chats
 from open_webui.models.groups import Groups
 from open_webui.models.users import Users
 from open_webui.models.feedbacks import Feedbacks
-from open_webui.utils.auth import get_admin_user
+from open_webui.utils.auth import get_admin_user, get_verified_user
 from open_webui.internal.db import get_async_session
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -440,3 +445,248 @@ async def get_model_overview(
     tags = [TagEntry(tag=tag, count=count) for tag, count in sorted(tag_counts.items(), key=lambda x: -x[1])[:10]]
 
     return ModelOverviewResponse(history=history, tags=tags)
+
+
+####################
+# Cost Analytics
+####################
+
+
+class CostByModelEntry(BaseModel):
+    model_id: str
+    input_cost: float
+    output_cost: float
+    total_cost: float
+    message_count: int
+
+
+class CostByModelResponse(BaseModel):
+    models: list[CostByModelEntry]
+    total_input_cost: float
+    total_output_cost: float
+    total_cost: float
+    currency: str = 'USD'
+
+
+class CostByUserEntry(BaseModel):
+    user_id: str
+    name: Optional[str] = None
+    email: Optional[str] = None
+    input_cost: float
+    output_cost: float
+    total_cost: float
+    message_count: int
+
+
+class CostByUserResponse(BaseModel):
+    users: list[CostByUserEntry]
+    total_cost: float
+    currency: str = 'USD'
+
+
+class UserCostSummary(BaseModel):
+    today: float
+    this_month: float
+    all_time: float
+    currency: str = 'USD'
+
+
+@router.get('/costs', response_model=CostByModelResponse)
+async def get_cost_by_model(
+    start_date: Optional[int] = Query(None, description='Start timestamp (epoch)'),
+    end_date: Optional[int] = Query(None, description='End timestamp (epoch)'),
+    group_id: Optional[str] = Query(None, description='Filter by user group ID'),
+    user=Depends(get_admin_user),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """Get cost aggregated by model (admin only)."""
+    cost_data = await ChatMessages.get_cost_by_model(
+        start_date=start_date, end_date=end_date, group_id=group_id, db=db
+    )
+
+    models = [
+        CostByModelEntry(model_id=model_id, **data)
+        for model_id, data in sorted(cost_data.items(), key=lambda x: -x[1]['total_cost'])
+    ]
+
+    total_input = sum(m.input_cost for m in models)
+    total_output = sum(m.output_cost for m in models)
+
+    return CostByModelResponse(
+        models=models,
+        total_input_cost=total_input,
+        total_output_cost=total_output,
+        total_cost=total_input + total_output,
+    )
+
+
+@router.get('/costs/users', response_model=CostByUserResponse)
+async def get_cost_by_user(
+    start_date: Optional[int] = Query(None, description='Start timestamp (epoch)'),
+    end_date: Optional[int] = Query(None, description='End timestamp (epoch)'),
+    group_id: Optional[str] = Query(None, description='Filter by user group ID'),
+    limit: int = Query(50, description='Max users to return'),
+    user=Depends(get_admin_user),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """Get cost aggregated by user (admin only)."""
+    cost_data = await ChatMessages.get_cost_by_user(
+        start_date=start_date, end_date=end_date, group_id=group_id, db=db
+    )
+
+    # Get top users by cost
+    top_user_ids = [
+        uid for uid, _ in sorted(cost_data.items(), key=lambda x: -x[1]['total_cost'])[:limit]
+    ]
+    user_info = {u.id: u for u in await Users.get_users_by_user_ids(top_user_ids, db=db)}
+
+    users = []
+    for user_id in top_user_ids:
+        u = user_info.get(user_id)
+        data = cost_data[user_id]
+        users.append(
+            CostByUserEntry(
+                user_id=user_id,
+                name=u.name if u else None,
+                email=u.email if u else None,
+                **data,
+            )
+        )
+
+    total_cost = sum(u.total_cost for u in users)
+
+    return CostByUserResponse(users=users, total_cost=total_cost)
+
+
+@router.get('/costs/export')
+async def export_cost_analytics(
+    format: str = Query('csv', description="Export format: 'csv' or 'json'"),
+    start_date: Optional[int] = Query(None, description='Start timestamp (epoch)'),
+    end_date: Optional[int] = Query(None, description='End timestamp (epoch)'),
+    group_id: Optional[str] = Query(None, description='Filter by user group ID'),
+    user=Depends(get_admin_user),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """Export cost analytics data (admin only)."""
+    # Get cost data by model and user
+    cost_by_model = await ChatMessages.get_cost_by_model(
+        start_date=start_date, end_date=end_date, group_id=group_id, db=db
+    )
+    cost_by_user = await ChatMessages.get_cost_by_user(
+        start_date=start_date, end_date=end_date, group_id=group_id, db=db
+    )
+
+    # Get user info
+    user_ids = list(cost_by_user.keys())
+    user_info = {u.id: u for u in await Users.get_users_by_user_ids(user_ids, db=db)}
+
+    if format == 'json':
+        export_data = {
+            'exported_at': datetime.utcnow().isoformat(),
+            'filters': {
+                'start_date': start_date,
+                'end_date': end_date,
+                'group_id': group_id,
+            },
+            'by_model': [
+                {'model_id': model_id, **data}
+                for model_id, data in sorted(cost_by_model.items(), key=lambda x: -x[1]['total_cost'])
+            ],
+            'by_user': [
+                {
+                    'user_id': user_id,
+                    'name': user_info.get(user_id).name if user_info.get(user_id) else None,
+                    'email': user_info.get(user_id).email if user_info.get(user_id) else None,
+                    **data,
+                }
+                for user_id, data in sorted(cost_by_user.items(), key=lambda x: -x[1]['total_cost'])
+            ],
+            'totals': {
+                'total_cost': sum(d['total_cost'] for d in cost_by_model.values()),
+                'total_input_cost': sum(d['input_cost'] for d in cost_by_model.values()),
+                'total_output_cost': sum(d['output_cost'] for d in cost_by_model.values()),
+                'currency': 'USD',
+            },
+        }
+        content = json_lib.dumps(export_data, indent=2)
+        return Response(
+            content=content,
+            media_type='application/json',
+            headers={'Content-Disposition': f'attachment; filename=cost-analytics-{int(time.time())}.json'},
+        )
+    else:
+        # CSV format
+        output = io.StringIO()
+        writer = csv.writer(output)
+
+        # Write by-model section
+        writer.writerow(['=== Cost by Model ==='])
+        writer.writerow(['model_id', 'input_cost', 'output_cost', 'total_cost', 'message_count'])
+        for model_id, data in sorted(cost_by_model.items(), key=lambda x: -x[1]['total_cost']):
+            writer.writerow([
+                model_id,
+                f"{data['input_cost']:.6f}",
+                f"{data['output_cost']:.6f}",
+                f"{data['total_cost']:.6f}",
+                data['message_count'],
+            ])
+
+        writer.writerow([])
+        writer.writerow(['=== Cost by User ==='])
+        writer.writerow(['user_id', 'name', 'email', 'input_cost', 'output_cost', 'total_cost', 'message_count'])
+        for user_id, data in sorted(cost_by_user.items(), key=lambda x: -x[1]['total_cost']):
+            u = user_info.get(user_id)
+            writer.writerow([
+                user_id,
+                u.name if u else '',
+                u.email if u else '',
+                f"{data['input_cost']:.6f}",
+                f"{data['output_cost']:.6f}",
+                f"{data['total_cost']:.6f}",
+                data['message_count'],
+            ])
+
+        content = output.getvalue()
+        return Response(
+            content=content,
+            media_type='text/csv',
+            headers={'Content-Disposition': f'attachment; filename=cost-analytics-{int(time.time())}.csv'},
+        )
+
+
+@router.get('/user/cost', response_model=UserCostSummary)
+async def get_user_cost(
+    user=Depends(get_verified_user),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """Get cost summary for the current user."""
+    now = int(time.time())
+
+    # Calculate time boundaries
+    today_start = int(datetime.now().replace(hour=0, minute=0, second=0, microsecond=0).timestamp())
+    month_start = int(datetime.now().replace(day=1, hour=0, minute=0, second=0, microsecond=0).timestamp())
+
+    # Get user's cost reset timestamp (if any)
+    cost_reset_at = await Users.get_user_cost_reset_at(user.id, db=db)
+
+    # Apply reset timestamp to boundaries
+    effective_today_start = max(today_start, cost_reset_at) if cost_reset_at else today_start
+    effective_month_start = max(month_start, cost_reset_at) if cost_reset_at else month_start
+    effective_all_time_start = cost_reset_at if cost_reset_at else None
+
+    # Get costs for different periods
+    today_data = await ChatMessages.get_user_cost_summary(
+        user_id=user.id, start_date=effective_today_start, end_date=now, db=db
+    )
+    month_data = await ChatMessages.get_user_cost_summary(
+        user_id=user.id, start_date=effective_month_start, end_date=now, db=db
+    )
+    all_time_data = await ChatMessages.get_user_cost_summary(
+        user_id=user.id, start_date=effective_all_time_start, db=db
+    )
+
+    return UserCostSummary(
+        today=today_data['total_cost'],
+        this_month=month_data['total_cost'],
+        all_time=all_time_data['total_cost'],
+    )
