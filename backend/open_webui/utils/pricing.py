@@ -84,21 +84,41 @@ def normalize_model_id(model_id: str) -> list[str]:
     Generate possible LiteLLM model ID variations to try.
     Returns a list of IDs to check, in priority order.
 
+    OpenWebUI often uses custom prefixes for model connections (e.g., 'openrouter/', 'myapi/').
+    LiteLLM uses provider prefixes like 'anthropic/', 'openai/', or no prefix at all.
+
     Examples:
         "gpt-4o" -> ["gpt-4o"]
         "openai/gpt-4o" -> ["openai/gpt-4o", "gpt-4o"]
-        "azure/gpt-4" -> ["azure/gpt-4", "gpt-4"]
+        "openrouter/anthropic/claude-3-haiku" -> [..., "anthropic/claude-3-haiku", "claude-3-haiku"]
+        "myprefix/gpt-4o-mini" -> ["myprefix/gpt-4o-mini", "gpt-4o-mini"]
     """
-    variations = [model_id]
+    variations = []
+    seen = set()
 
-    # If model has provider prefix, also try without it
-    if "/" in model_id:
-        base_model = model_id.split("/", 1)[-1]
-        variations.append(base_model)
+    def add_variation(v: str):
+        if v and v not in seen:
+            variations.append(v)
+            seen.add(v)
 
-    # Try lowercase versions
-    lowercase_variations = [v.lower() for v in variations if v.lower() not in variations]
-    variations.extend(lowercase_variations)
+    # Original model ID
+    add_variation(model_id)
+
+    # Split by '/' and try progressively shorter paths
+    parts = model_id.split("/")
+    for i in range(1, len(parts)):
+        # Join remaining parts (strip leading prefixes one at a time)
+        remaining = "/".join(parts[i:])
+        add_variation(remaining)
+
+    # Also try just the last segment (base model name)
+    if len(parts) > 1:
+        add_variation(parts[-1])
+
+    # Try lowercase versions of all variations
+    lowercase_variations = [v.lower() for v in list(variations) if v.lower() not in seen]
+    for lv in lowercase_variations:
+        add_variation(lv)
 
     return variations
 

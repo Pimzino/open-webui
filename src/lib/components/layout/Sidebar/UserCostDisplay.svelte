@@ -12,11 +12,21 @@
 	let error: string | null = null;
 
 	const formatCurrency = (amount: number, currency: string = 'USD'): string => {
+		// For very small amounts (< $0.01), show up to 6 decimal places
+		// For small amounts (< $1), show up to 4 decimal places
+		// For larger amounts, show 2 decimal places
+		let maxDecimals = 2;
+		if (amount > 0 && amount < 0.01) {
+			maxDecimals = 6;
+		} else if (amount > 0 && amount < 1) {
+			maxDecimals = 4;
+		}
+
 		return new Intl.NumberFormat('en-US', {
 			style: 'currency',
 			currency: currency,
 			minimumFractionDigits: 2,
-			maximumFractionDigits: 4
+			maximumFractionDigits: maxDecimals
 		}).format(amount);
 	};
 

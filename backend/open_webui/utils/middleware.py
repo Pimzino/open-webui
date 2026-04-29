@@ -3436,13 +3436,13 @@ async def non_streaming_chat_response_handler(response, ctx):
                     usage = normalize_usage(response_data.get('usage', {}) or {})
 
                     # Calculate cost if usage data is available
-                    if usage and usage.get('input_tokens') and usage.get('output_tokens'):
+                    if usage and (usage.get('input_tokens') is not None or usage.get('output_tokens') is not None):
                         model_id = metadata.get('model_id') or form_data.get('model', '')
                         model_meta = (model.get('info', {}) or {}).get('meta') if isinstance(model, dict) else None
                         cost = await calculate_cost(
                             model_id,
-                            usage['input_tokens'],
-                            usage['output_tokens'],
+                            usage.get('input_tokens') or 0,
+                            usage.get('output_tokens') or 0,
                             model_meta,
                         )
                         usage = normalize_usage_with_cost(usage, cost)
@@ -4974,13 +4974,13 @@ async def streaming_chat_response_handler(response, ctx):
                         item['status'] = 'completed'
 
                 # Calculate cost if usage data is available (streaming)
-                if usage and usage.get('input_tokens') and usage.get('output_tokens'):
+                if usage and (usage.get('input_tokens') is not None or usage.get('output_tokens') is not None):
                     stream_model_id = metadata.get('model_id') or form_data.get('model', '')
                     model_meta = (model.get('info', {}) or {}).get('meta') if isinstance(model, dict) else None
                     cost = await calculate_cost(
                         stream_model_id,
-                        usage['input_tokens'],
-                        usage['output_tokens'],
+                        usage.get('input_tokens') or 0,
+                        usage.get('output_tokens') or 0,
                         model_meta,
                     )
                     usage = normalize_usage_with_cost(usage, cost)
