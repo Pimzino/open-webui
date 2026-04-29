@@ -3,7 +3,7 @@ import time
 import uuid
 from typing import Any, Optional
 
-from sqlalchemy import select, delete, func, cast, Integer, Float
+from sqlalchemy import select, delete, func, cast, Integer, Float, or_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from open_webui.internal.db import Base, get_async_db_context
 from open_webui.utils.response import normalize_usage
@@ -788,6 +788,64 @@ class ChatMessageTable:
                 'message_count': row.message_count,
                 'currency': 'USD',
             }
+
+    async def get_messages_without_cost(
+        self,
+        limit: int = 1000,
+        db: Optional[AsyncSession] = None,
+    ) -> list[ChatMessage]:
+        """Get messages that have usage/tokens but no cost data."""
+        async with get_async_db_context(db) as db:
+            bind = await db.connection()
+            dialect = bind.dialect.name
+
+            # Filter for messages with usage but no cost field
+            if dialect == 'sqlite':
+                has_tokens = or_(
+                    func.json_extract(ChatMessage.usage, '$.input_tokens').isnot(None),
+                    func.json_extract(ChatMessage.usage, '$.prompt_tokens').isnot(None),
+                )
+                has_cost = func.json_extract(ChatMessage.usage, '$.cost').isnot(None)
+            elif dialect == 'postgresql':
+                has_tokens = or_(
+                    func.json_extract_path_text(ChatMessage.usage, 'input_tokens').isnot(None),
+                    func.json_extract_path_text(ChatMessage.usage, 'prompt_tokens').isnot(None),
+                )
+                has_cost = func.json_extract_path_text(ChatMessage.usage, 'cost').isnot(None)
+            else:
+                return []
+
+            stmt = (
+                select(ChatMessage)
+                .filter(
+                    ChatMessage.role == 'assistant',
+                    ChatMessage.usage.isnot(None),
+                    has_tokens,
+                    ~has_cost,
+                )
+                .order_by(ChatMessage.created_at.desc())
+                .limit(limit)
+            )
+
+            result = await db.execute(stmt)
+            return list(result.scalars().all())
+
+    async def update_message_usage(
+        self,
+        message_id: str,
+        usage: dict,
+        db: Optional[AsyncSession] = None,
+    ) -> bool:
+        """Update usage field for a message."""
+        async with get_async_db_context(db) as db:
+            stmt = (
+                update(ChatMessage)
+                .where(ChatMessage.id == message_id)
+                .values(usage=usage)
+            )
+            await db.execute(stmt)
+            await db.commit()
+            return True
 
 
 ChatMessages = ChatMessageTable()

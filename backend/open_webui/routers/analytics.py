@@ -690,3 +690,145 @@ async def get_user_cost(
         this_month=month_data['total_cost'],
         all_time=all_time_data['total_cost'],
     )
+
+
+####################
+# Pricing Diagnostics
+####################
+
+
+class PricingStatusResponse(BaseModel):
+    cache_status: dict
+    sample_models: list[str]
+
+
+class PricingLookupResponse(BaseModel):
+    model_id: str
+    matched: bool
+    matched_provider: Optional[str] = None
+    matched_model: Optional[str] = None
+    pricing: Optional[dict] = None
+
+
+@router.get('/pricing/status', response_model=PricingStatusResponse)
+async def get_pricing_status(
+    user=Depends(get_admin_user),
+):
+    """Get pricing cache status and sample of available models (admin only)."""
+    from open_webui.utils.pricing import get_cache_status, get_pricing_data
+
+    status = get_cache_status()
+    pricing_data = get_pricing_data()
+
+    # Get sample of provider/model pairs (first 20 that have pricing)
+    sample = []
+    for provider_id, provider in list(pricing_data.items())[:20]:
+        if not isinstance(provider, dict):
+            continue
+        models = provider.get('models') or {}
+        for model_id, model in list(models.items())[:3]:
+            if isinstance(model, dict) and model.get('cost'):
+                sample.append(f"{provider_id}/{model_id}")
+                if len(sample) >= 20:
+                    break
+        if len(sample) >= 20:
+            break
+
+    return PricingStatusResponse(cache_status=status, sample_models=sample)
+
+
+@router.get('/pricing/lookup')
+async def lookup_model_pricing(
+    model_id: str = Query(..., description='Model ID to look up'),
+    base_model_id: Optional[str] = Query(None, description='Optional base model ID'),
+    owned_by: Optional[str] = Query(None, description='Optional provider hint'),
+    user=Depends(get_admin_user),
+):
+    """Test pricing lookup for a model ID (admin only)."""
+    from open_webui.utils.pricing import get_model_pricing, _split_model_candidates
+
+    candidates = _split_model_candidates(model_id)
+    pricing = get_model_pricing(model_id, base_model_id, owned_by)
+
+    return PricingLookupResponse(
+        model_id=model_id,
+        matched=pricing is not None,
+        matched_provider=pricing.get('matched_provider') if pricing else None,
+        matched_model=pricing.get('matched_model') if pricing else None,
+        pricing=pricing,
+    )
+
+
+@router.get('/pricing/models-in-use')
+async def get_models_in_use(
+    user=Depends(get_admin_user),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """Get list of model IDs actually used in chats with their pricing status (admin only)."""
+    from open_webui.utils.pricing import get_model_pricing
+
+    # Get distinct model IDs from messages
+    model_counts = await ChatMessages.get_message_count_by_model(db=db)
+
+    results = []
+    for model_id, count in sorted(model_counts.items(), key=lambda x: -x[1])[:50]:
+        pricing = get_model_pricing(model_id)
+        results.append({
+            'model_id': model_id,
+            'message_count': count,
+            'has_pricing': pricing is not None,
+            'pricing_source': pricing.get('source') if pricing else None,
+            'matched_provider': pricing.get('matched_provider') if pricing else None,
+            'matched_model': pricing.get('matched_model') if pricing else None,
+        })
+
+    return results
+
+
+@router.post('/pricing/recalculate')
+async def recalculate_costs(
+    limit: int = Query(1000, description='Max messages to process'),
+    user=Depends(get_admin_user),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """Recalculate costs for messages that have tokens but no cost data (admin only)."""
+    from open_webui.utils.pricing import calculate_cost, extract_token_breakdown
+
+    # Get messages with usage but no cost
+    messages = await ChatMessages.get_messages_without_cost(limit=limit, db=db)
+
+    updated = 0
+    skipped = 0
+    no_pricing = 0
+
+    for msg in messages:
+        usage = msg.usage or {}
+        token_breakdown = extract_token_breakdown(usage)
+
+        if not token_breakdown['input_tokens'] and not token_breakdown['output_tokens']:
+            skipped += 1
+            continue
+
+        cost = calculate_cost(
+            msg.model_id or '',
+            token_breakdown['input_tokens'],
+            token_breakdown['output_tokens'],
+            reasoning_tokens=token_breakdown.get('reasoning_tokens', 0),
+            cache_read_tokens=token_breakdown.get('cache_read_tokens', 0),
+            cache_write_tokens=token_breakdown.get('cache_write_tokens', 0),
+        )
+        if cost:
+            # Update the message with cost data
+            new_usage = dict(usage)
+            new_usage['cost'] = cost
+            await ChatMessages.update_message_usage(msg.id, new_usage, db=db)
+            updated += 1
+        else:
+            no_pricing += 1
+
+    return {
+        'processed': len(messages),
+        'updated': updated,
+        'skipped_no_tokens': skipped,
+        'skipped_no_pricing': no_pricing,
+    }

@@ -114,7 +114,7 @@ from open_webui.utils.filter import (
 from open_webui.utils.code_interpreter import execute_code_jupyter
 from open_webui.utils.payload import apply_system_prompt_to_body
 from open_webui.utils.response import normalize_usage
-from open_webui.utils.pricing import calculate_cost, normalize_usage_with_cost
+from open_webui.utils.pricing import calculate_cost, normalize_usage_with_cost, extract_token_breakdown
 from open_webui.utils.mcp.client import MCPClient
 
 
@@ -3438,12 +3438,24 @@ async def non_streaming_chat_response_handler(response, ctx):
                     # Calculate cost if usage data is available
                     if usage and (usage.get('input_tokens') is not None or usage.get('output_tokens') is not None):
                         model_id = metadata.get('model_id') or form_data.get('model', '')
-                        model_meta = (model.get('info', {}) or {}).get('meta') if isinstance(model, dict) else None
-                        cost = await calculate_cost(
+                        model_info = model.get('info', {}) if isinstance(model, dict) else {}
+                        base_model_id = model_info.get('base_model_id')
+                        owned_by = model.get('owned_by') or model_info.get('owned_by') if isinstance(model, dict) else None
+                        model_meta = model_info.get('meta')
+
+                        # Extract detailed token breakdown
+                        token_breakdown = extract_token_breakdown(usage)
+
+                        cost = calculate_cost(
                             model_id,
-                            usage.get('input_tokens') or 0,
-                            usage.get('output_tokens') or 0,
-                            model_meta,
+                            token_breakdown['input_tokens'],
+                            token_breakdown['output_tokens'],
+                            base_model_id=base_model_id,
+                            owned_by=owned_by,
+                            model_meta=model_meta,
+                            reasoning_tokens=token_breakdown.get('reasoning_tokens', 0),
+                            cache_read_tokens=token_breakdown.get('cache_read_tokens', 0),
+                            cache_write_tokens=token_breakdown.get('cache_write_tokens', 0),
                         )
                         usage = normalize_usage_with_cost(usage, cost)
 
@@ -4976,12 +4988,24 @@ async def streaming_chat_response_handler(response, ctx):
                 # Calculate cost if usage data is available (streaming)
                 if usage and (usage.get('input_tokens') is not None or usage.get('output_tokens') is not None):
                     stream_model_id = metadata.get('model_id') or form_data.get('model', '')
-                    model_meta = (model.get('info', {}) or {}).get('meta') if isinstance(model, dict) else None
-                    cost = await calculate_cost(
+                    model_info = model.get('info', {}) if isinstance(model, dict) else {}
+                    base_model_id = model_info.get('base_model_id')
+                    owned_by = model.get('owned_by') or model_info.get('owned_by') if isinstance(model, dict) else None
+                    model_meta = model_info.get('meta')
+
+                    # Extract detailed token breakdown
+                    token_breakdown = extract_token_breakdown(usage)
+
+                    cost = calculate_cost(
                         stream_model_id,
-                        usage.get('input_tokens') or 0,
-                        usage.get('output_tokens') or 0,
-                        model_meta,
+                        token_breakdown['input_tokens'],
+                        token_breakdown['output_tokens'],
+                        base_model_id=base_model_id,
+                        owned_by=owned_by,
+                        model_meta=model_meta,
+                        reasoning_tokens=token_breakdown.get('reasoning_tokens', 0),
+                        cache_read_tokens=token_breakdown.get('cache_read_tokens', 0),
+                        cache_write_tokens=token_breakdown.get('cache_write_tokens', 0),
                     )
                     usage = normalize_usage_with_cost(usage, cost)
 
