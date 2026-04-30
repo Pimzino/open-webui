@@ -114,7 +114,7 @@ from open_webui.utils.filter import (
 from open_webui.utils.code_interpreter import execute_code_jupyter
 from open_webui.utils.payload import apply_system_prompt_to_body
 from open_webui.utils.response import normalize_usage
-from open_webui.utils.pricing import calculate_cost, normalize_usage_with_cost, extract_token_breakdown
+from open_webui.utils.pricing import calculate_cost, normalize_usage_with_cost, extract_token_breakdown, extract_upstream_cost
 from open_webui.utils.mcp.client import MCPClient
 
 
@@ -3457,6 +3457,11 @@ async def non_streaming_chat_response_handler(response, ctx):
                             cache_read_tokens=token_breakdown.get('cache_read_tokens', 0),
                             cache_write_tokens=token_breakdown.get('cache_write_tokens', 0),
                         )
+
+                        # Fall back to upstream provider cost if our pricing lookup failed
+                        if not cost:
+                            cost = extract_upstream_cost(usage)
+
                         usage = normalize_usage_with_cost(usage, cost)
 
                     await Chats.upsert_message_to_chat_by_id_and_message_id(
@@ -5007,6 +5012,11 @@ async def streaming_chat_response_handler(response, ctx):
                         cache_read_tokens=token_breakdown.get('cache_read_tokens', 0),
                         cache_write_tokens=token_breakdown.get('cache_write_tokens', 0),
                     )
+
+                    # Fall back to upstream provider cost if our pricing lookup failed
+                    if not cost:
+                        cost = extract_upstream_cost(usage)
+
                     usage = normalize_usage_with_cost(usage, cost)
 
                 title = await Chats.get_chat_title_by_id(metadata['chat_id'])

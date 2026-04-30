@@ -799,19 +799,21 @@ class ChatMessageTable:
             bind = await db.connection()
             dialect = bind.dialect.name
 
-            # Filter for messages with usage but no cost field
+            # Filter for messages with usage but no structured cost data.
+            # Note: upstream providers (e.g. OpenRouter) may set usage.cost as a flat number,
+            # so we check for our nested format (cost.total_cost) specifically.
             if dialect == 'sqlite':
                 has_tokens = or_(
                     func.json_extract(ChatMessage.usage, '$.input_tokens').isnot(None),
                     func.json_extract(ChatMessage.usage, '$.prompt_tokens').isnot(None),
                 )
-                has_cost = func.json_extract(ChatMessage.usage, '$.cost').isnot(None)
+                has_structured_cost = func.json_extract(ChatMessage.usage, '$.cost.total_cost').isnot(None)
             elif dialect == 'postgresql':
                 has_tokens = or_(
                     func.json_extract_path_text(ChatMessage.usage, 'input_tokens').isnot(None),
                     func.json_extract_path_text(ChatMessage.usage, 'prompt_tokens').isnot(None),
                 )
-                has_cost = func.json_extract_path_text(ChatMessage.usage, 'cost').isnot(None)
+                has_structured_cost = func.json_extract_path_text(ChatMessage.usage, 'cost', 'total_cost').isnot(None)
             else:
                 return []
 
@@ -821,7 +823,7 @@ class ChatMessageTable:
                     ChatMessage.role == 'assistant',
                     ChatMessage.usage.isnot(None),
                     has_tokens,
-                    ~has_cost,
+                    ~has_structured_cost,
                 )
                 .order_by(ChatMessage.created_at.desc())
                 .limit(limit)

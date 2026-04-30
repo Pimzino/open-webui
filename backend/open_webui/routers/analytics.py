@@ -816,8 +816,21 @@ async def recalculate_costs(
             cache_read_tokens=token_breakdown.get('cache_read_tokens', 0),
             cache_write_tokens=token_breakdown.get('cache_write_tokens', 0),
         )
+
+        # If our pricing lookup failed, try upstream cost from provider
+        if not cost:
+            upstream_cost = usage.get('cost')
+            if isinstance(upstream_cost, (int, float)) and upstream_cost > 0:
+                cost_details = usage.get('cost_details') or {}
+                cost = {
+                    'input_cost': float(cost_details.get('upstream_inference_prompt_cost', 0)),
+                    'output_cost': float(cost_details.get('upstream_inference_completions_cost', 0)),
+                    'total_cost': float(upstream_cost),
+                    'currency': 'USD',
+                    'pricing_source': 'upstream',
+                }
+
         if cost:
-            # Update the message with cost data
             new_usage = dict(usage)
             new_usage['cost'] = cost
             await ChatMessages.update_message_usage(msg.id, new_usage, db=db)

@@ -446,6 +446,25 @@ def calculate_cost(
     }
 
 
+def extract_upstream_cost(usage: dict) -> Optional[dict]:
+    """
+    Extract cost from upstream provider (e.g. OpenRouter) when they include it.
+    Returns structured cost dict, or None.
+    """
+    upstream_cost = usage.get("cost")
+    if not isinstance(upstream_cost, (int, float)) or upstream_cost <= 0:
+        return None
+
+    cost_details = usage.get("cost_details") or {}
+    return {
+        "input_cost": float(cost_details.get("upstream_inference_prompt_cost", 0)),
+        "output_cost": float(cost_details.get("upstream_inference_completions_cost", 0)),
+        "total_cost": float(upstream_cost),
+        "currency": "USD",
+        "pricing_source": "upstream",
+    }
+
+
 def normalize_usage_with_cost(usage: dict, cost: Optional[dict]) -> dict:
     """Merge cost data into a normalized usage dict."""
     if not cost:
