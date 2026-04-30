@@ -745,9 +745,8 @@ async def lookup_model_pricing(
     user=Depends(get_admin_user),
 ):
     """Test pricing lookup for a model ID (admin only)."""
-    from open_webui.utils.pricing import get_model_pricing, _split_model_candidates
+    from open_webui.utils.pricing import get_model_pricing
 
-    candidates = _split_model_candidates(model_id)
     pricing = get_model_pricing(model_id, base_model_id, owned_by)
 
     return PricingLookupResponse(

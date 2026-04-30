@@ -2,11 +2,12 @@
 Model pricing utilities for cost tracking.
 
 Fetches pricing data from models.dev and calculates costs based on token usage.
-Uses the same pricing resolution approach as OpenCode cost tracker.
+Uses fuzzy model ID matching to handle different naming conventions across providers.
 """
 
 import json
 import logging
+import re
 import time
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Optional
@@ -29,98 +30,93 @@ DISPLAY_QUANTIZE = Decimal("0.00000001")
 # In-memory cache
 _pricing_cache: dict = {}
 _pricing_cache_timestamp: float = 0
+# Fuzzy lookup index: maps stripped model name -> list of (provider_id, model_id, cost)
+_fuzzy_index: dict[str, list[dict]] = {}
 
 
-def _safe_decimal(value) -> Decimal:
-    try:
-        return Decimal(str(value))
-    except Exception:
-        return Decimal("0")
+def _to_alphanum(value: str) -> str:
+    """Strip everything except lowercase alphanumeric chars for fuzzy matching."""
+    return re.sub(r'[^a-z0-9]', '', value.lower())
 
 
-def _normalize_identifier(value: Optional[str]) -> str:
-    if not value:
-        return ""
-    return "".join(ch for ch in value.strip().lower() if ch.isalnum() or ch in "-._/:")
-
-
-def _split_model_candidates(model_id: Optional[str]) -> list[str]:
-    """Generate candidate model IDs to try for lookup.
-
-    OpenWebUI uses dot-separated connection prefixes, e.g.:
-        "openrouter.anthropic/claude-opus-4.5" -> connection=openrouter, provider=anthropic, model=claude-opus-4.5
-        "myapi.openai/gpt-4o" -> connection=myapi, provider=openai, model=gpt-4o
+def _extract_model_name(model_id: str) -> str:
     """
-    if not model_id:
-        return []
+    Extract the bare model name from an OpenWebUI model ID.
 
-    raw = model_id.strip()
-    candidates = [raw]
+    Handles formats like:
+        "openrouter.anthropic/claude-opus-4.5" -> "claude-opus-4.5"
+        "openai/gpt-4o" -> "gpt-4o"
+        "gpt-4o" -> "gpt-4o"
+        "connection:model-name" -> "model-name"
+    """
+    # Strip connection.provider/ prefix
+    if "/" in model_id:
+        model_id = model_id.split("/")[-1]
+    # Strip colon prefix
+    if ":" in model_id:
+        model_id = model_id.split(":")[-1]
+    return model_id.strip()
 
-    # Handle OpenWebUI dot-separated connection prefix (e.g., "openrouter.anthropic/claude-opus-4.5")
-    # Split on first "/" to get the prefix and model name
-    if "/" in raw:
-        prefix, model_name = raw.split("/", 1)
-        # Check if prefix has a dot (connection.provider format)
+
+def _extract_provider_hint(model_id: str, owned_by: Optional[str] = None) -> Optional[str]:
+    """
+    Extract provider hint from model ID or owned_by field.
+
+    "openrouter.anthropic/claude-opus-4.5" -> "anthropic"
+    "openai/gpt-4o" -> "openai"
+    """
+    if owned_by:
+        return owned_by.strip().lower()
+
+    if "/" in model_id:
+        prefix = model_id.split("/")[0]
+        # Handle "connection.provider" format
         if "." in prefix:
-            dot_parts = prefix.split(".")
-            # Last segment after dot is the actual provider
-            provider = dot_parts[-1]
-            # Add provider/model (e.g., "anthropic/claude-opus-4.5")
-            candidates.append(f"{provider}/{model_name}")
-            # Add just the model name
-            candidates.append(model_name)
-        else:
-            # Simple prefix/model format
-            candidates.append(model_name)
+            return prefix.split(".")[-1].strip().lower()
+        return prefix.strip().lower()
 
-    # Handle colon separator (e.g., "provider:model")
-    if ":" in raw:
-        candidates.append(raw.split(":")[-1])
+    return None
 
-    # Handle slash separator - try progressively shorter paths
-    parts = raw.split("/")
-    for i in range(1, len(parts)):
-        remaining = "/".join(parts[i:])
-        if remaining not in candidates:
-            candidates.append(remaining)
 
-    # Also add just the last segment
-    if len(parts) > 1:
-        last = parts[-1]
-        if last not in candidates:
-            candidates.append(last)
+def _build_fuzzy_index(catalog: dict) -> dict[str, list[dict]]:
+    """
+    Build a fuzzy lookup index from the models.dev catalog.
 
-    # Handle -latest suffix
-    if raw.endswith("-latest"):
-        candidates.append(raw[:-len("-latest")])
+    Maps stripped alphanumeric model names to their catalog entries.
+    This makes matching resilient to dots vs hyphens vs underscores etc.
+    """
+    index: dict[str, list[dict]] = {}
 
-    # Version dot-to-hyphen normalization (e.g., "claude-opus-4.5" -> "claude-opus-4-5")
-    # Models.dev uses hyphens, but OpenRouter/OpenWebUI may use dots for versions
-    extra = []
-    for c in candidates:
-        normalized = c.replace(".", "-")
-        if normalized != c:
-            extra.append(normalized)
-    candidates.extend(extra)
+    for provider_id, provider in catalog.items():
+        if not isinstance(provider, dict):
+            continue
+        models = provider.get("models")
+        if not isinstance(models, dict):
+            continue
 
-    # Deduplicate while preserving order
-    seen = set()
-    deduped = []
-    for c in candidates:
-        key = _normalize_identifier(c)
-        if key and key not in seen:
-            seen.add(key)
-            deduped.append(c)
+        for model_id, model in models.items():
+            if not isinstance(model, dict):
+                continue
+            cost = model.get("cost")
+            if not cost:
+                continue
 
-    return deduped
+            entry = {
+                "provider_id": provider_id,
+                "model_id": model_id,
+                "cost": cost,
+            }
+
+            # Index by stripped model name
+            key = _to_alphanum(model_id)
+            if key:
+                index.setdefault(key, []).append(entry)
+
+    return index
 
 
 def fetch_models_dev_pricing() -> dict:
-    """
-    Fetch pricing data from models.dev.
-    Returns empty dict on failure.
-    """
+    """Fetch pricing data from models.dev. Returns empty dict on failure."""
     try:
         request = Request(
             MODELS_DEV_URL,
@@ -136,10 +132,8 @@ def fetch_models_dev_pricing() -> dict:
 
 
 def get_pricing_data() -> dict:
-    """
-    Get pricing data, using cache if available and fresh.
-    """
-    global _pricing_cache, _pricing_cache_timestamp
+    """Get pricing data, using cache if available and fresh."""
+    global _pricing_cache, _pricing_cache_timestamp, _fuzzy_index
 
     current_time = time.time()
     cache_age = current_time - _pricing_cache_timestamp
@@ -152,6 +146,7 @@ def get_pricing_data() -> dict:
     if fresh_data:
         _pricing_cache = fresh_data
         _pricing_cache_timestamp = current_time
+        _fuzzy_index = _build_fuzzy_index(fresh_data)
         return _pricing_cache
 
     if _pricing_cache:
@@ -159,6 +154,14 @@ def get_pricing_data() -> dict:
         return _pricing_cache
 
     return {}
+
+
+def _get_fuzzy_index() -> dict[str, list[dict]]:
+    """Get the fuzzy index, building it if needed."""
+    global _fuzzy_index
+    if not _fuzzy_index and _pricing_cache:
+        _fuzzy_index = _build_fuzzy_index(_pricing_cache)
+    return _fuzzy_index
 
 
 def resolve_model_pricing(
@@ -170,24 +173,25 @@ def resolve_model_pricing(
     """
     Resolve pricing for a model using models.dev catalog.
 
-    Tries multiple strategies:
-    1. Explicit provider/model format (e.g., "openai/gpt-4o")
-    2. Exact model ID match across all providers
-    3. Normalized model ID match
+    Strategy:
+    1. Try exact provider/model lookup if format allows
+    2. Fuzzy match: strip both the incoming model name and all catalog model names
+       to alphanumeric-only, then match. This handles dots vs hyphens, underscores,
+       etc. without any special-case code.
+    3. If multiple fuzzy matches, prefer the one matching the provider hint.
 
     Returns dict with provider_id, model_id, cost, and source.
     """
-    # Extract provider hint from owned_by or from dot-prefix in model ID
-    provider_hint = _normalize_identifier(owned_by)
-    if not provider_hint and requested_model and "/" in requested_model:
-        prefix = requested_model.split("/", 1)[0]
-        if "." in prefix:
-            # "openrouter.anthropic/model" -> provider hint is "anthropic"
-            provider_hint = _normalize_identifier(prefix.split(".")[-1])
+    if not requested_model:
+        return {"provider_id": None, "model_id": None, "cost": {}, "source": "unresolved"}
 
-    requested_candidates = _split_model_candidates(requested_model)
-    base_candidates = _split_model_candidates(base_model_id)
+    provider_hint = _extract_provider_hint(requested_model, owned_by)
+    model_name = _extract_model_name(requested_model)
 
+    # Also try base_model_id if provided
+    base_model_name = _extract_model_name(base_model_id) if base_model_id else None
+
+    # --- Strategy 1: Exact lookup with provider/model ---
     def exact_lookup(provider_id: str, model_id: str, source: str) -> Optional[dict]:
         provider = catalog.get(provider_id)
         if not isinstance(provider, dict):
@@ -202,89 +206,46 @@ def resolve_model_pricing(
             "source": source,
         }
 
-    # Try explicit provider/model format from requested_model
-    if requested_model and "/" in requested_model:
-        parts = requested_model.split("/")
-        if len(parts) >= 2:
-            # Could be "openrouter/openai/gpt-4o" or "openai/gpt-4o"
-            # Try last two segments first, then first two
-            provider_id = parts[-2]
-            model_id = parts[-1]
-            match = exact_lookup(provider_id, model_id, "explicit")
-            if match:
-                return match
+    # Try provider_hint + model_name as exact lookup
+    if provider_hint and model_name:
+        match = exact_lookup(provider_hint, model_name, "exact")
+        if match:
+            return match
 
-            if len(parts) > 2:
-                provider_id = parts[0]
-                model_id = "/".join(parts[1:])
-                match = exact_lookup(provider_id, model_id, "explicit")
-                if match:
-                    return match
+    # Try base model with provider hint
+    if provider_hint and base_model_name:
+        match = exact_lookup(provider_hint, base_model_name, "exact_base")
+        if match:
+            return match
 
-    # Try explicit format from base_model_id
-    if base_model_id and "/" in base_model_id:
-        parts = base_model_id.split("/")
-        if len(parts) >= 2:
-            provider_id = parts[-2] if len(parts) > 2 else parts[0]
-            model_id = parts[-1]
-            match = exact_lookup(provider_id, model_id, "explicit_base")
-            if match:
-                return match
+    # --- Strategy 2: Fuzzy index lookup ---
+    index = _get_fuzzy_index()
 
-    # Search for exact model ID matches across all providers
-    search_candidates = requested_candidates + [c for c in base_candidates if c not in requested_candidates]
+    # Try model names in priority order
+    names_to_try = [model_name]
+    if base_model_name and base_model_name != model_name:
+        names_to_try.append(base_model_name)
 
-    exact_hits = []
-    for candidate in search_candidates:
-        for provider_id, provider in catalog.items():
-            if not isinstance(provider, dict):
-                continue
-            model = (provider.get("models") or {}).get(candidate)
-            if isinstance(model, dict):
-                exact_hits.append({
-                    "provider_id": provider_id,
-                    "model_id": candidate,
-                    "cost": model.get("cost") or {},
-                    "source": "exact_id",
-                })
-
-    if exact_hits:
-        # Prefer provider that matches hint
-        if provider_hint:
-            preferred = [h for h in exact_hits if _normalize_identifier(h["provider_id"]) == provider_hint]
-            if preferred:
-                return preferred[0]
-        # Default to openai if available, then sort
-        exact_hits.sort(key=lambda h: (h["provider_id"] != "openai", h["provider_id"], h["model_id"]))
-        return exact_hits[0]
-
-    # Try normalized matching
-    normalized_candidates = [_normalize_identifier(c) for c in search_candidates if c]
-    normalized_candidates = list(dict.fromkeys(normalized_candidates))  # Dedupe
-
-    normalized_hits = []
-    for norm_candidate in normalized_candidates:
-        if not norm_candidate:
+    for name in names_to_try:
+        key = _to_alphanum(name)
+        if not key:
             continue
-        for provider_id, provider in catalog.items():
-            if not isinstance(provider, dict):
-                continue
-            for model_id, model in (provider.get("models") or {}).items():
-                if _normalize_identifier(model_id) == norm_candidate:
-                    normalized_hits.append({
-                        "provider_id": provider_id,
-                        "model_id": model_id,
-                        "cost": model.get("cost") or {},
-                        "source": "normalized_id",
-                    })
 
-    if normalized_hits:
+        hits = index.get(key)
+        if not hits:
+            continue
+
+        # If we have a provider hint, prefer that provider
         if provider_hint:
-            preferred = [h for h in normalized_hits if _normalize_identifier(h["provider_id"]) == provider_hint]
+            preferred = [h for h in hits if h["provider_id"].lower() == provider_hint]
             if preferred:
-                return preferred[0]
-        normalized_hits.sort(key=lambda h: (h["provider_id"] != "openai", h["provider_id"], h["model_id"]))
-        return normalized_hits[0]
+                h = preferred[0]
+                return {**h, "source": "fuzzy"}
+
+        # Otherwise pick the first match (prefer openai as default)
+        sorted_hits = sorted(hits, key=lambda h: (h["provider_id"] != "openai", h["provider_id"]))
+        h = sorted_hits[0]
+        return {**h, "source": "fuzzy"}
 
     return {
         "provider_id": None,
@@ -339,10 +300,10 @@ def get_model_pricing(
     cost = resolved.get("cost") or {}
 
     # models.dev uses cost per 1M tokens
-    input_per_million = _safe_decimal(cost.get("input", 0))
-    output_per_million = _safe_decimal(cost.get("output", 0))
-    cache_read_per_million = _safe_decimal(cost.get("cache_read", 0))
-    cache_write_per_million = _safe_decimal(cost.get("cache_write", 0))
+    input_per_million = Decimal(str(cost.get("input", 0)))
+    output_per_million = Decimal(str(cost.get("output", 0)))
+    cache_read_per_million = Decimal(str(cost.get("cache_read", 0)))
+    cache_write_per_million = Decimal(str(cost.get("cache_write", 0)))
 
     if input_per_million == 0 and output_per_million == 0:
         return None
@@ -486,9 +447,7 @@ def calculate_cost(
 
 
 def normalize_usage_with_cost(usage: dict, cost: Optional[dict]) -> dict:
-    """
-    Merge cost data into a normalized usage dict.
-    """
+    """Merge cost data into a normalized usage dict."""
     if not cost:
         return usage
 
@@ -499,12 +458,13 @@ def normalize_usage_with_cost(usage: dict, cost: Optional[dict]) -> dict:
 
 def refresh_pricing_cache() -> bool:
     """Force refresh the pricing cache."""
-    global _pricing_cache, _pricing_cache_timestamp
+    global _pricing_cache, _pricing_cache_timestamp, _fuzzy_index
 
     fresh_data = fetch_models_dev_pricing()
     if fresh_data:
         _pricing_cache = fresh_data
         _pricing_cache_timestamp = time.time()
+        _fuzzy_index = _build_fuzzy_index(fresh_data)
         return True
     return False
 
@@ -516,6 +476,7 @@ def get_cache_status() -> dict:
 
     return {
         "cached_providers": len(_pricing_cache),
+        "fuzzy_index_entries": len(_fuzzy_index),
         "cache_age_seconds": round(cache_age, 1) if cache_age else None,
         "cache_ttl_seconds": PRICING_CACHE_TTL_SECONDS,
         "cache_fresh": cache_age < PRICING_CACHE_TTL_SECONDS if cache_age else False,
