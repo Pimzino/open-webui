@@ -426,6 +426,30 @@ export const getCostByUser = async (
 	return res;
 };
 
+export const recalculateCosts = async (
+	token: string = '',
+	limit: number = 5000
+): Promise<{ processed: number; updated: number; skipped_no_tokens: number; skipped_no_pricing: number }> => {
+	const searchParams = new URLSearchParams();
+	searchParams.append('limit', limit.toString());
+
+	const res = await fetch(`${WEBUI_API_BASE_URL}/analytics/pricing/recalculate?${searchParams.toString()}`, {
+		method: 'POST',
+		headers: {
+			Accept: 'application/json',
+			'Content-Type': 'application/json',
+			authorization: `Bearer ${token}`
+		}
+	});
+
+	if (!res.ok) {
+		const error = await res.json();
+		throw error.detail || 'Recalculate failed';
+	}
+
+	return res.json();
+};
+
 export const exportCostAnalytics = async (
 	token: string = '',
 	format: 'csv' | 'json' = 'csv',

@@ -9,7 +9,8 @@
 		getTokenUsage,
 		getCostByModel,
 		getCostByUser,
-		exportCostAnalytics
+		exportCostAnalytics,
+		recalculateCosts
 	} from '$lib/apis/analytics';
 	import fileSaver from 'file-saver';
 	const { saveAs } = fileSaver;
@@ -74,6 +75,8 @@
 	let costByUser: Record<string, { input_cost: number; output_cost: number; total_cost: number }> = {};
 	let totalCost = { input: 0, output: 0, total: 0 };
 	let exporting = false;
+	let recalculating = false;
+	let recalculateResult: { processed: number; updated: number; skipped_no_tokens: number; skipped_no_pricing: number } | null = null;
 
 	let loading = true;
 
@@ -200,6 +203,18 @@
 		exporting = false;
 	};
 
+	const handleRecalculate = async () => {
+		recalculating = true;
+		recalculateResult = null;
+		try {
+			recalculateResult = await recalculateCosts(localStorage.token, 5000);
+			await loadDashboard();
+		} catch (err) {
+			console.error('Recalculate failed:', err);
+		}
+		recalculating = false;
+	};
+
 	$: if (selectedPeriod || selectedGroupId !== undefined) {
 		loadDashboard();
 	}
@@ -316,7 +331,7 @@
 					{$i18n.t('tokens')}</span
 				>
 			</Tooltip>
-			<Tooltip content={$i18n.t('Cost estimates based on LiteLLM pricing data')}>
+			<Tooltip content={$i18n.t('Cost from upstream provider or models.dev pricing data')}>
 				<span class="cursor-help"
 					><span class="font-medium text-gray-900 dark:text-gray-300"
 						>{formatCurrency(totalCost.total)}</span
@@ -335,7 +350,21 @@
 				{$i18n.t('users')}</span
 			>
 		</div>
-		<div class="flex gap-1">
+		<div class="flex gap-1 items-center">
+			{#if recalculateResult}
+				<span class="text-xs text-green-600 dark:text-green-400 mr-1">
+					{recalculateResult.updated} updated
+				</span>
+			{/if}
+			<Tooltip content={$i18n.t('Recalculate costs for messages missing cost data')}>
+				<button
+					class="px-2 py-1 text-xs bg-blue-50 dark:bg-blue-900/30 text-blue-600 dark:text-blue-400 rounded hover:bg-blue-100 dark:hover:bg-blue-900/50 transition disabled:opacity-50"
+					disabled={recalculating}
+					on:click={handleRecalculate}
+				>
+					{recalculating ? $i18n.t('Recalculating...') : $i18n.t('Recalculate Costs')}
+				</button>
+			</Tooltip>
 			<button
 				class="px-2 py-1 text-xs bg-gray-100 dark:bg-gray-800 rounded hover:bg-gray-200 dark:hover:bg-gray-700 transition disabled:opacity-50"
 				disabled={exporting}
