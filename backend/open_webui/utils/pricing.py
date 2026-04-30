@@ -95,6 +95,15 @@ def _split_model_candidates(model_id: Optional[str]) -> list[str]:
     if raw.endswith("-latest"):
         candidates.append(raw[:-len("-latest")])
 
+    # Version dot-to-hyphen normalization (e.g., "claude-opus-4.5" -> "claude-opus-4-5")
+    # Models.dev uses hyphens, but OpenRouter/OpenWebUI may use dots for versions
+    extra = []
+    for c in candidates:
+        normalized = c.replace(".", "-")
+        if normalized != c:
+            extra.append(normalized)
+    candidates.extend(extra)
+
     # Deduplicate while preserving order
     seen = set()
     deduped = []
