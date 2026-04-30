@@ -53,7 +53,7 @@
 		}
 	};
 
-	$: if (show && !loading) {
+	$: if (show && !$userCost && !loading) {
 		loadCostData();
 	}
 </script>
