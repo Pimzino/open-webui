@@ -45,12 +45,34 @@ def _normalize_identifier(value: Optional[str]) -> str:
 
 
 def _split_model_candidates(model_id: Optional[str]) -> list[str]:
-    """Generate candidate model IDs to try for lookup."""
+    """Generate candidate model IDs to try for lookup.
+
+    OpenWebUI uses dot-separated connection prefixes, e.g.:
+        "openrouter.anthropic/claude-opus-4.5" -> connection=openrouter, provider=anthropic, model=claude-opus-4.5
+        "myapi.openai/gpt-4o" -> connection=myapi, provider=openai, model=gpt-4o
+    """
     if not model_id:
         return []
 
     raw = model_id.strip()
     candidates = [raw]
+
+    # Handle OpenWebUI dot-separated connection prefix (e.g., "openrouter.anthropic/claude-opus-4.5")
+    # Split on first "/" to get the prefix and model name
+    if "/" in raw:
+        prefix, model_name = raw.split("/", 1)
+        # Check if prefix has a dot (connection.provider format)
+        if "." in prefix:
+            dot_parts = prefix.split(".")
+            # Last segment after dot is the actual provider
+            provider = dot_parts[-1]
+            # Add provider/model (e.g., "anthropic/claude-opus-4.5")
+            candidates.append(f"{provider}/{model_name}")
+            # Add just the model name
+            candidates.append(model_name)
+        else:
+            # Simple prefix/model format
+            candidates.append(model_name)
 
     # Handle colon separator (e.g., "provider:model")
     if ":" in raw:
@@ -59,11 +81,15 @@ def _split_model_candidates(model_id: Optional[str]) -> list[str]:
     # Handle slash separator - try progressively shorter paths
     parts = raw.split("/")
     for i in range(1, len(parts)):
-        candidates.append("/".join(parts[i:]))
+        remaining = "/".join(parts[i:])
+        if remaining not in candidates:
+            candidates.append(remaining)
 
     # Also add just the last segment
     if len(parts) > 1:
-        candidates.append(parts[-1])
+        last = parts[-1]
+        if last not in candidates:
+            candidates.append(last)
 
     # Handle -latest suffix
     if raw.endswith("-latest"):
@@ -142,7 +168,14 @@ def resolve_model_pricing(
 
     Returns dict with provider_id, model_id, cost, and source.
     """
+    # Extract provider hint from owned_by or from dot-prefix in model ID
     provider_hint = _normalize_identifier(owned_by)
+    if not provider_hint and requested_model and "/" in requested_model:
+        prefix = requested_model.split("/", 1)[0]
+        if "." in prefix:
+            # "openrouter.anthropic/model" -> provider hint is "anthropic"
+            provider_hint = _normalize_identifier(prefix.split(".")[-1])
+
     requested_candidates = _split_model_candidates(requested_model)
     base_candidates = _split_model_candidates(base_model_id)
 
