@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { onMount, getContext } from 'svelte';
-	import { models } from '$lib/stores';
+	import { models, refreshUserCost } from '$lib/stores';
 	import {
 		getSummary,
 		getModelAnalytics,
@@ -209,6 +209,7 @@
 		try {
 			recalculateResult = await recalculateCosts(localStorage.token, 5000);
 			await loadDashboard();
+			refreshUserCost();
 		} catch (err) {
 			console.error('Recalculate failed:', err);
 		}

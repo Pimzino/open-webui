@@ -4,6 +4,7 @@ import type { ModelConfig } from '$lib/apis';
 import type { Banner } from '$lib/types';
 import type { Socket } from 'socket.io-client';
 import type { AudioQueue } from '$lib/utils/audio';
+import { getUserCostSummary } from '$lib/apis/analytics';
 
 import emojiShortCodes from '$lib/emoji-shortcodes.json';
 
@@ -42,6 +43,24 @@ export type UserCostData = {
 	currency: string;
 };
 export const userCost: Writable<UserCostData | null> = writable(null);
+
+export const refreshUserCost = async () => {
+	try {
+		const token = localStorage?.token;
+		if (!token) return;
+		const data = await getUserCostSummary(token);
+		if (data) {
+			userCost.set({
+				today: data.today,
+				thisMonth: data.this_month,
+				allTime: data.all_time,
+				currency: data.currency || 'USD'
+			});
+		}
+	} catch (e) {
+		console.error('Failed to refresh user cost:', e);
+	}
+};
 
 export const theme = writable('system');
 

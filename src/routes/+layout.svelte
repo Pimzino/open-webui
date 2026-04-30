@@ -37,7 +37,8 @@
 		showFileNavPath,
 		showFileNavDir,
 		pyodideWorker,
-		desktopEvent
+		desktopEvent,
+		refreshUserCost
 	} from '$lib/stores';
 	import { getFileContentById } from '$lib/apis/files';
 	import { goto } from '$app/navigation';
@@ -1035,6 +1036,8 @@
 						} catch (error) {
 							console.error('Error refreshing backend config:', error);
 						}
+
+						refreshUserCost();
 
 						// Keep user timezone in sync on every app load/refresh
 						const timezone = getUserTimezone();
