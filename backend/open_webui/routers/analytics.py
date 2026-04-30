@@ -791,7 +791,7 @@ async def recalculate_costs(
     db: AsyncSession = Depends(get_async_session),
 ):
     """Recalculate costs for messages that have tokens but no cost data (admin only)."""
-    from open_webui.utils.pricing import calculate_cost, extract_token_breakdown
+    from open_webui.utils.pricing import calculate_cost, extract_token_breakdown, extract_upstream_cost
 
     # Get messages with usage but no cost
     messages = await ChatMessages.get_messages_without_cost(limit=limit, db=db)
@@ -808,27 +808,19 @@ async def recalculate_costs(
             skipped += 1
             continue
 
-        cost = calculate_cost(
-            msg.model_id or '',
-            token_breakdown['input_tokens'],
-            token_breakdown['output_tokens'],
-            reasoning_tokens=token_breakdown.get('reasoning_tokens', 0),
-            cache_read_tokens=token_breakdown.get('cache_read_tokens', 0),
-            cache_write_tokens=token_breakdown.get('cache_write_tokens', 0),
-        )
+        # Prefer upstream provider cost (e.g. OpenRouter includes actual charged cost)
+        cost = extract_upstream_cost(usage)
 
-        # If our pricing lookup failed, try upstream cost from provider
+        # Fall back to models.dev calculation when provider doesn't include cost
         if not cost:
-            upstream_cost = usage.get('cost')
-            if isinstance(upstream_cost, (int, float)) and upstream_cost > 0:
-                cost_details = usage.get('cost_details') or {}
-                cost = {
-                    'input_cost': float(cost_details.get('upstream_inference_prompt_cost', 0)),
-                    'output_cost': float(cost_details.get('upstream_inference_completions_cost', 0)),
-                    'total_cost': float(upstream_cost),
-                    'currency': 'USD',
-                    'pricing_source': 'upstream',
-                }
+            cost = calculate_cost(
+                msg.model_id or '',
+                token_breakdown['input_tokens'],
+                token_breakdown['output_tokens'],
+                reasoning_tokens=token_breakdown.get('reasoning_tokens', 0),
+                cache_read_tokens=token_breakdown.get('cache_read_tokens', 0),
+                cache_write_tokens=token_breakdown.get('cache_write_tokens', 0),
+            )
 
         if cost:
             new_usage = dict(usage)

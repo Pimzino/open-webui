@@ -3446,21 +3446,22 @@ async def non_streaming_chat_response_handler(response, ctx):
                         # Extract detailed token breakdown
                         token_breakdown = extract_token_breakdown(usage)
 
-                        cost = calculate_cost(
-                            model_id,
-                            token_breakdown['input_tokens'],
-                            token_breakdown['output_tokens'],
-                            base_model_id=base_model_id,
-                            owned_by=owned_by,
-                            model_meta=model_meta,
-                            reasoning_tokens=token_breakdown.get('reasoning_tokens', 0),
-                            cache_read_tokens=token_breakdown.get('cache_read_tokens', 0),
-                            cache_write_tokens=token_breakdown.get('cache_write_tokens', 0),
-                        )
+                        # Prefer upstream provider cost (e.g. OpenRouter includes actual charged cost)
+                        cost = extract_upstream_cost(usage)
 
-                        # Fall back to upstream provider cost if our pricing lookup failed
+                        # Fall back to models.dev calculation when provider doesn't include cost
                         if not cost:
-                            cost = extract_upstream_cost(usage)
+                            cost = calculate_cost(
+                                model_id,
+                                token_breakdown['input_tokens'],
+                                token_breakdown['output_tokens'],
+                                base_model_id=base_model_id,
+                                owned_by=owned_by,
+                                model_meta=model_meta,
+                                reasoning_tokens=token_breakdown.get('reasoning_tokens', 0),
+                                cache_read_tokens=token_breakdown.get('cache_read_tokens', 0),
+                                cache_write_tokens=token_breakdown.get('cache_write_tokens', 0),
+                            )
 
                         usage = normalize_usage_with_cost(usage, cost)
 
@@ -5001,21 +5002,22 @@ async def streaming_chat_response_handler(response, ctx):
                     # Extract detailed token breakdown
                     token_breakdown = extract_token_breakdown(usage)
 
-                    cost = calculate_cost(
-                        stream_model_id,
-                        token_breakdown['input_tokens'],
-                        token_breakdown['output_tokens'],
-                        base_model_id=base_model_id,
-                        owned_by=owned_by,
-                        model_meta=model_meta,
-                        reasoning_tokens=token_breakdown.get('reasoning_tokens', 0),
-                        cache_read_tokens=token_breakdown.get('cache_read_tokens', 0),
-                        cache_write_tokens=token_breakdown.get('cache_write_tokens', 0),
-                    )
+                    # Prefer upstream provider cost (e.g. OpenRouter includes actual charged cost)
+                    cost = extract_upstream_cost(usage)
 
-                    # Fall back to upstream provider cost if our pricing lookup failed
+                    # Fall back to models.dev calculation when provider doesn't include cost
                     if not cost:
-                        cost = extract_upstream_cost(usage)
+                        cost = calculate_cost(
+                            stream_model_id,
+                            token_breakdown['input_tokens'],
+                            token_breakdown['output_tokens'],
+                            base_model_id=base_model_id,
+                            owned_by=owned_by,
+                            model_meta=model_meta,
+                            reasoning_tokens=token_breakdown.get('reasoning_tokens', 0),
+                            cache_read_tokens=token_breakdown.get('cache_read_tokens', 0),
+                            cache_write_tokens=token_breakdown.get('cache_write_tokens', 0),
+                        )
 
                     usage = normalize_usage_with_cost(usage, cost)
 
